@@ -1,0 +1,77 @@
+name: Rebuild on OpenClaw digest change
+
+on:
+  schedule:
+    # Check every 6 hours for new OpenClaw image
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: runonflux/openclaw-tailscale
+  BASE_IMAGE: ghcr.io/openclaw/openclaw:latest
+
+jobs:
+  check-and-rebuild:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check current base image digest
+        id: check
+        run: |
+          # Get the latest digest of the base image
+          NEW_DIGEST=$(docker manifest inspect ${{ env.BASE_IMAGE }} 2>/dev/null | jq -r '.manifests[0].digest // .config.digest' 2>/dev/null || echo "")
+          if [ -z "$NEW_DIGEST" ]; then
+            NEW_DIGEST=$(skopeo inspect --raw docker://${{ env.BASE_IMAGE }} | jq -r '.manifests[0].digest // .config.digest')
+          fi
+          echo "new_digest=$NEW_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Current upstream digest: $NEW_DIGEST"
+
+      - name: Get stored digest
+        id: stored
+        run: |
+          # Try to get the base image digest label from our built image
+          OLD_DIGEST=$(docker manifest inspect ${{ env.IMAGE_NAME }}:latest 2>/dev/null | jq -r '.manifests[0].digest // empty' 2>/dev/null || echo "")
+          # Also check our label
+          LABEL_DIGEST=$(docker inspect --format='{{index .Config.Labels "org.opencontainers.image.base.digest"}}' ${{ env.IMAGE_NAME }}:latest 2>/dev/null || echo "")
+          echo "old_digest=$LABEL_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Stored digest: $LABEL_DIGEST"
+
+      - name: Compare digests
+        id: compare
+        run: |
+          if [ "${{ steps.check.outputs.new_digest }}" != "${{ steps.stored.outputs.old_digest }}" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Digest changed, rebuild needed"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Digest unchanged, skipping rebuild"
+          fi
+
+      - name: Checkout
+        if: steps.compare.outputs.changed == 'true'
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        if: steps.compare.outputs.changed == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        if: steps.compare.outputs.changed == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        if: steps.compare.outputs.changed == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.base.digest=${{ steps.check.outputs.new_digest }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
