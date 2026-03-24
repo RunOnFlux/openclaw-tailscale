@@ -32,7 +32,7 @@ jobs:
           # Try to get the base image digest label from our built image
           OLD_DIGEST=$(docker manifest inspect ${{ env.IMAGE_NAME }}:latest 2>/dev/null | jq -r '.manifests[0].digest // empty' 2>/dev/null || echo "")
           # Also check our label
-          LABEL_DIGEST=$(docker inspect --format='{{index .Config.Labels "org.opencontainers.image.base.digest"}}' ${{ env.IMAGE_NAME }}:latest 2>/dev/null || echo "")
+          LABEL_DIGEST=$(docker inspect --format='${{ '{{' }}index .Config.Labels "org.opencontainers.image.base.digest"${{ '}}' }}' ${{ env.IMAGE_NAME }}:latest 2>/dev/null || echo "")
           echo "old_digest=$LABEL_DIGEST" >> "$GITHUB_OUTPUT"
           echo "Stored digest: $LABEL_DIGEST"
 
