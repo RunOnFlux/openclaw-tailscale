@@ -40,15 +40,28 @@ docker run \
 
 ## Accessing the Tailscale network
 
-Because userspace networking does not create a network interface, applications must use the proxy to reach other devices on your tailnet:
+Because userspace networking does not create a network interface, applications must use the SOCKS5 proxy to reach other devices on your tailnet. Direct TCP connections (SSH, curl, etc.) will **not** route through Tailscale automatically.
 
 ```bash
-# Via SOCKS5
-curl --socks5 localhost:1055 http://100.64.0.1:8080
+# SSH into a Tailscale machine
+ssh -o ProxyCommand='ncat --proxy-type socks5 --proxy localhost:1055 %h %p' user@100.64.0.1
+
+# curl via SOCKS5
+curl --socks5-hostname localhost:1055 http://100.64.0.1:8080
 
 # Via HTTP proxy
 HTTP_PROXY=http://localhost:1055 curl http://my-server.tail12345.ts.net
 ```
+
+> **Tip:** Add a `~/.ssh/config` entry to avoid typing the proxy option every time:
+> ```
+> Host 100.*
+>     ProxyCommand ncat --proxy-type socks5 --proxy localhost:1055 %h %p
+> ```
+
+## Tailscale state persistence
+
+Tailscale state is stored in `/home/node/.openclaw/tailscale/` — inside the Flux persistent volume (`containerData`). This means the node identity survives container restarts and redeploys, preventing duplicate devices on your tailnet.
 
 ## Build locally
 
