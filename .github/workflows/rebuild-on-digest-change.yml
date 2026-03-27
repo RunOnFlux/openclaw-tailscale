@@ -4,6 +4,9 @@ on:
   schedule:
     # Check every 6 hours for new OpenClaw image
     - cron: '0 */6 * * *'
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 env:
@@ -39,7 +42,10 @@ jobs:
       - name: Compare digests
         id: compare
         run: |
-          if [ "${{ steps.check.outputs.new_digest }}" != "${{ steps.stored.outputs.old_digest }}" ]; then
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Non-scheduled trigger (${{ github.event_name }}), always rebuild"
+          elif [ "${{ steps.check.outputs.new_digest }}" != "${{ steps.stored.outputs.old_digest }}" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "Digest changed, rebuild needed"
           else
