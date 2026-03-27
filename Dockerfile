@@ -15,11 +15,15 @@ RUN apt-get update && \
 # Create state directory for Tailscale
 RUN mkdir -p /var/run/tailscale /var/lib/tailscale
 
+# Ensure OpenClaw config directory exists
+RUN mkdir -p /home/node/.openclaw
+
 COPY start.sh /start.sh
 RUN chmod +x /start.sh
 
 ENV TAILSCALE_AUTHKEY=""
 ENV TAILSCALE_HOSTNAME="openclaw"
 ENV TAILSCALE_EXTRA_ARGS=""
+ENV HOME=/home/node
 
 CMD ["/start.sh"]
