@@ -8,7 +8,7 @@ RUN apt-get update && \
     curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.noarmor.gpg | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null && \
     curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.tailscale-keyring.list | tee /etc/apt/sources.list.d/tailscale.list && \
     apt-get update && \
-    apt-get install -y tailscale && \
+    apt-get install -y tailscale ncat && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
