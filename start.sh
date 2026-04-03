@@ -23,27 +23,32 @@ sleep 3
 
 if [ -n "$TAILSCALE_AUTHKEY" ]; then
     echo "Connecting to Tailscale network..."
-    tailscale up --authkey="$TAILSCALE_AUTHKEY" --hostname="$TAILSCALE_HOSTNAME" $TAILSCALE_EXTRA_ARGS
-    TS_IP=$(tailscale ip -4 2>/dev/null || echo "unknown")
-    echo "Tailscale connected. IP: ${TS_IP}"
-    echo ""
-    echo "=== IMPORTANT: Tailscale userspace networking mode ==="
-    echo "Flux containers do not support kernel-level TUN devices."
-    echo "Tailscale runs in userspace-networking mode, which means:"
-    echo "  - 'tailscale ping' and 'tailscale status' work normally"
-    echo "  - Direct TCP connections (SSH, etc.) do NOT go through Tailscale"
-    echo "  - You MUST route traffic through the proxy:"
-    echo ""
-    echo "  SOCKS5 proxy: localhost:${SOCKS5_PORT}"
-    echo "  HTTP proxy:   localhost:${HTTP_PROXY_PORT}"
-    echo ""
-    echo "  SSH example:"
-    echo "    ssh -o ProxyCommand='nc -x localhost:${SOCKS5_PORT} %h %p' user@<tailscale-ip>"
-    echo "  or with ncat:"
-    echo "    ssh -o ProxyCommand='ncat --proxy-type socks5 --proxy localhost:${SOCKS5_PORT} %h %p' user@<tailscale-ip>"
-    echo "  curl example:"
-    echo "    curl --socks5 localhost:${SOCKS5_PORT} http://<tailscale-ip>:8080"
-    echo "======================================================="
+    if tailscale up --authkey="$TAILSCALE_AUTHKEY" --hostname="$TAILSCALE_HOSTNAME" $TAILSCALE_EXTRA_ARGS; then
+        TS_IP=$(tailscale ip -4 2>/dev/null || echo "unknown")
+        echo "Tailscale connected. IP: ${TS_IP}"
+        echo ""
+        echo "=== IMPORTANT: Tailscale userspace networking mode ==="
+        echo "Flux containers do not support kernel-level TUN devices."
+        echo "Tailscale runs in userspace-networking mode, which means:"
+        echo "  - 'tailscale ping' and 'tailscale status' work normally"
+        echo "  - Direct TCP connections (SSH, etc.) do NOT go through Tailscale"
+        echo "  - You MUST route traffic through the proxy:"
+        echo ""
+        echo "  SOCKS5 proxy: localhost:${SOCKS5_PORT}"
+        echo "  HTTP proxy:   localhost:${HTTP_PROXY_PORT}"
+        echo ""
+        echo "  SSH example:"
+        echo "    ssh -o ProxyCommand='nc -x localhost:${SOCKS5_PORT} %h %p' user@<tailscale-ip>"
+        echo "  or with ncat:"
+        echo "    ssh -o ProxyCommand='ncat --proxy-type socks5 --proxy localhost:${SOCKS5_PORT} %h %p' user@<tailscale-ip>"
+        echo "  curl example:"
+        echo "    curl --socks5 localhost:${SOCKS5_PORT} http://<tailscale-ip>:8080"
+        echo "======================================================="
+    else
+        echo "ERROR: Tailscale failed to connect (bad auth key or network issue)."
+        echo "       OpenClaw will start WITHOUT Tailscale networking."
+        echo "       Please check your TAILSCALE_AUTHKEY and redeploy."
+    fi
 else
     echo "WARNING: TAILSCALE_AUTHKEY not set. Tailscale not connected."
 fi
