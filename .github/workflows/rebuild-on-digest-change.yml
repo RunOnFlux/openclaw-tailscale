@@ -2,8 +2,8 @@ name: Rebuild on OpenClaw digest change
 
 on:
   schedule:
-    # Check every 6 hours for new OpenClaw image
-    - cron: '0 */6 * * *'
+    # Check once per day for a new OpenClaw image
+    - cron: '0 6 * * *'
   push:
     branches:
       - main
@@ -21,10 +21,13 @@ jobs:
       - name: Check current base image digest
         id: check
         run: |
-          # Get the latest digest of the base image
-          NEW_DIGEST=$(docker manifest inspect ${{ env.BASE_IMAGE }} 2>/dev/null | jq -r '.manifests[0].digest // .config.digest' 2>/dev/null || echo "")
+          # Top-level manifest-list (index) digest of the base image. This
+          # changes whenever ANY platform or attestation changes upstream.
+          NEW_DIGEST=$(docker buildx imagetools inspect "$BASE_IMAGE" \
+            --format '{{ json .Manifest }}' 2>/dev/null | jq -r '.digest // empty')
           if [ -z "$NEW_DIGEST" ]; then
-            NEW_DIGEST=$(skopeo inspect --raw docker://${{ env.BASE_IMAGE }} | jq -r '.manifests[0].digest // .config.digest')
+            echo "::error::Could not resolve base image digest for $BASE_IMAGE"
+            exit 1
           fi
           echo "new_digest=$NEW_DIGEST" >> "$GITHUB_OUTPUT"
           echo "Current upstream digest: $NEW_DIGEST"
@@ -32,12 +35,15 @@ jobs:
       - name: Get stored digest
         id: stored
         run: |
-          # Try to get the base image digest label from our built image
-          OLD_DIGEST=$(docker manifest inspect ${{ env.IMAGE_NAME }}:latest 2>/dev/null | jq -r '.manifests[0].digest // empty' 2>/dev/null || echo "")
-          # Also check our label
-          LABEL_DIGEST=$(docker inspect --format='${{ '{{' }}index .Config.Labels "org.opencontainers.image.base.digest"${{ '}}' }}' ${{ env.IMAGE_NAME }}:latest 2>/dev/null || echo "")
-          echo "old_digest=$LABEL_DIGEST" >> "$GITHUB_OUTPUT"
-          echo "Stored digest: $LABEL_DIGEST"
+          # Read the base-image digest label back from our PUBLISHED image in
+          # the registry. Must read from the registry (not `docker inspect`,
+          # which only sees images already pulled to this runner — there are
+          # none on a fresh runner, so it always returned empty and forced a
+          # rebuild every run).
+          STORED_DIGEST=$(docker buildx imagetools inspect "$IMAGE_NAME:latest" \
+            --format '{{ index .Image.Config.Labels "org.opencontainers.image.base.digest" }}' 2>/dev/null || echo "")
+          echo "old_digest=$STORED_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Stored digest: $STORED_DIGEST"
 
       - name: Compare digests
         id: compare
