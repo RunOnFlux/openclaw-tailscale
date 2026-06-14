@@ -70,9 +70,11 @@ docker build -t runonflux/openclaw-tailscale:latest .
 docker push runonflux/openclaw-tailscale:latest
 ```
 
-## Automated rebuilds
+## Base image version & automated rebuilds
 
-A GitHub Actions workflow (`.github/workflows/rebuild-on-digest-change.yml`) checks every 6 hours if the upstream `ghcr.io/openclaw/openclaw:latest` image has changed. If the digest differs, it automatically rebuilds and pushes a new image.
+This image pins to upstream's **stable releases** — the `YYYY.M.D` tags of `ghcr.io/openclaw/openclaw`, never `:latest`. Upstream's `:latest` is an alias of `:main` (a rolling build of their main branch, i.e. unreleased code); following it rebuilt this image whenever `main` advanced and restarted every Flux deployment onto unreleased builds. The pinned default lives in the `Dockerfile` (`ARG OPENCLAW_VERSION`) and is overridable at build time with `--build-arg OPENCLAW_VERSION=YYYY.M.D`.
+
+A GitHub Actions workflow (`.github/workflows/rebuild-on-new-release.yml`) runs daily and **follows new stable releases automatically**: it detects the newest stable `YYYY.M.D` tag on GHCR (excluding `-slim` variants and `-alpha`/`-beta`/`-rc` pre-releases), compares it to the version baked into the currently-published image (read from the `org.opencontainers.image.base.version` label), and rebuilds **only when a genuinely new release appears** — so deployments restart on real releases, not on main-branch churn. It also rebuilds on every push to `main`, and on manual dispatch (where you can force a specific version via the `force_version` input).
 
 ### Required GitHub secrets
 
@@ -81,7 +83,7 @@ A GitHub Actions workflow (`.github/workflows/rebuild-on-digest-change.yml`) che
 | `DOCKERHUB_USERNAME` | Docker Hub username |
 | `DOCKERHUB_TOKEN` | Docker Hub access token |
 
-The workflow can also be triggered manually via `workflow_dispatch`.
+The workflow can also be triggered manually via `workflow_dispatch` (optionally forcing a specific base version).
 
 ## Project structure
 
@@ -92,7 +94,7 @@ The workflow can also be triggered manually via `workflow_dispatch`.
 ├── README.md
 └── .github/
     └── workflows/
-        └── rebuild-on-digest-change.yml        # Auto-rebuild on upstream changes
+        └── rebuild-on-new-release.yml          # Auto-rebuild on new stable upstream release
 ```
 
 ## License

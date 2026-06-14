@@ -1,0 +1,118 @@
+name: Rebuild on new stable OpenClaw release
+
+# Pin to upstream's STABLE releases (YYYY.M.D tags) and follow them
+# automatically. Upstream's :latest tag is an alias of :main — a rolling build
+# of their main branch (unreleased code) — so tracking it rebuilt this image
+# whenever main advanced and restarted every Flux deployment onto unreleased
+# builds. Instead, this workflow detects the newest stable version tag on GHCR,
+# compares it to the version baked into our published image, and only rebuilds
+# when a genuinely new release appears. The detected version is passed to the
+# build as OPENCLAW_VERSION.
+
+on:
+  schedule:
+    # Daily check — cheap; it only builds when a NEW stable tag is published.
+    - cron: '0 6 * * *'
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      force_version:
+        description: 'Base version tag to build (e.g. 2026.5.22). Blank = auto-detect newest stable.'
+        required: false
+        default: ''
+
+env:
+  IMAGE_NAME: runonflux/openclaw-tailscale
+  BASE_REPO: openclaw/openclaw          # GHCR repository (ghcr.io/<BASE_REPO>)
+
+jobs:
+  check-and-rebuild:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Resolve newest stable upstream version
+        id: latest
+        run: |
+          OVERRIDE="${{ github.event.inputs.force_version }}"
+          if [ -n "$OVERRIDE" ]; then
+            LATEST="$OVERRIDE"
+            echo "Using forced version: $LATEST"
+          else
+            # Stable releases are YYYY.M.D[-N] tags (N = same-day hotfix). The
+            # :latest / :main rolling builds, the -slim variants, and -alpha /
+            # -beta / -rc pre-releases are all deliberately excluded. List tags
+            # from GHCR (anonymous pull token), keep the stable ones, pick the
+            # highest by semver order (sort -V).
+            TOKEN=$(curl -fsSL "https://ghcr.io/token?scope=repository:${BASE_REPO}:pull" | jq -r '.token')
+            LATEST=$(curl -fsSL -H "Authorization: Bearer $TOKEN" \
+              "https://ghcr.io/v2/${BASE_REPO}/tags/list?n=2000" \
+              | jq -r '.tags[]?' \
+              | grep -E '^[0-9]{4}\.[0-9]+\.[0-9]+(-[0-9]+)?$' \
+              | sort -V | tail -1)
+          fi
+          if [ -z "$LATEST" ]; then
+            echo "::error::Could not resolve a stable YYYY.M.D tag for ${BASE_REPO}"
+            exit 1
+          fi
+          echo "version=$LATEST" >> "$GITHUB_OUTPUT"
+          echo "Newest stable upstream version: $LATEST"
+
+      - name: Read version baked into our published image
+        id: current
+        run: |
+          # Read the base version label back from our PUBLISHED image in the
+          # registry (not `docker inspect`, which only sees locally-pulled images
+          # — a fresh runner has none, so it would always look empty and force a
+          # rebuild). Empty on the first run after this migration -> one rebuild.
+          CURRENT=$(docker buildx imagetools inspect "${IMAGE_NAME}:latest" \
+            --format '{{ index .Image.Config.Labels "org.opencontainers.image.base.version" }}' 2>/dev/null || echo "")
+          echo "version=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "Currently published base version: ${CURRENT:-<none>}"
+
+      - name: Decide whether to rebuild
+        id: decide
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "Non-scheduled trigger (${{ github.event_name }}) -> always rebuild"
+          elif [ "${{ steps.latest.outputs.version }}" != "${{ steps.current.outputs.version }}" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "New stable release ${{ steps.latest.outputs.version }} (published image is on '${{ steps.current.outputs.version }}') -> rebuild"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "Already on ${{ steps.latest.outputs.version }} -> skip rebuild"
+          fi
+
+      - name: Checkout
+        if: steps.decide.outputs.build == 'true'
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        if: steps.decide.outputs.build == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        if: steps.decide.outputs.build == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        if: steps.decide.outputs.build == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: |
+            OPENCLAW_VERSION=${{ steps.latest.outputs.version }}
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.base.name=ghcr.io/${{ env.BASE_REPO }}:${{ steps.latest.outputs.version }}
+            org.opencontainers.image.base.version=${{ steps.latest.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,4 +1,13 @@
-FROM ghcr.io/openclaw/openclaw:latest
+# Base image: pin to the latest STABLE OpenClaw release (a YYYY.M.D tag), never
+# :latest. Upstream's :latest is an alias of :main — a rolling build of their
+# main branch (unreleased code) — so following it rebuilt this image whenever
+# main advanced and restarted every Flux deployment onto unreleased builds. The
+# rebuild workflow (.github/workflows/rebuild-on-new-release.yml) auto-bumps the
+# published image to the newest stable tag when upstream cuts a release, passing
+# it as --build-arg OPENCLAW_VERSION. This default is the fallback for local
+# builds; override with: --build-arg OPENCLAW_VERSION=YYYY.M.D
+ARG OPENCLAW_VERSION=2026.5.22
+FROM ghcr.io/openclaw/openclaw:${OPENCLAW_VERSION}
 
 USER root
 
