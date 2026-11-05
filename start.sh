@@ -53,5 +53,20 @@ else
     echo "WARNING: TAILSCALE_AUTHKEY not set. Tailscale not connected."
 fi
 
+# Newer OpenClaw releases refuse to start on state written by older ones until
+# "openclaw doctor --fix" has migrated it (2026.9.5 is the required bridge for
+# anything older than July 2026). Run it once per image version, tracked by a
+# marker inside the persistent volume. A Doctor failure must not stop the
+# gateway from starting, so its exit code is only logged.
+DOCTOR_MARKER="/home/node/.openclaw/.flux-doctor-${OPENCLAW_VERSION:-unknown}"
+if [ -n "$OPENCLAW_VERSION" ] && [ ! -f "$DOCTOR_MARKER" ]; then
+    echo "Running openclaw doctor --fix for ${OPENCLAW_VERSION} (first start of this version)..."
+    if openclaw doctor --fix --non-interactive; then
+        touch "$DOCTOR_MARKER"
+    else
+        echo "WARNING: openclaw doctor exited non-zero; will retry on next start."
+    fi
+fi
+
 echo "Starting OpenClaw..."
 exec openclaw "$@"
