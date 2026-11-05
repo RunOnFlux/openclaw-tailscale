@@ -41,8 +41,16 @@ permissions:
   contents: read
   actions: write   # keepalive step below
 
+# One run at a time: a push and the daily schedule must not publish in parallel.
+concurrency:
+  group: rebuild-image
+  cancel-in-progress: false
+
 jobs:
   check-and-rebuild:
+    # Publishing :latest is only ever done from main, so a dispatch from another
+    # branch cannot overwrite what every deployed app follows.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
 
     steps:
@@ -52,6 +60,10 @@ jobs:
           FORCE_VERSION: ${{ github.event.inputs.force_version }}
         run: |
           OVERRIDE="$FORCE_VERSION"
+          if [ -n "$OVERRIDE" ] && ! echo "$OVERRIDE" | grep -Eq '^[0-9]{4}\.[0-9]+\.[0-9]+(-[0-9]+)?$'; then
+            echo "::error::force_version must look like 2026.11.1"
+            exit 1
+          fi
           if [ -n "$OVERRIDE" ]; then
             LATEST="$OVERRIDE"
             echo "Using forced version: $LATEST"
@@ -72,16 +84,24 @@ jobs:
             while [ -n "$URL" ]; do
               curl -fsSL -D "$RUNNER_TEMP/headers.txt" -o "$RUNNER_TEMP/page.json" -H "Authorization: Bearer $TOKEN" "$URL"
               ALL="$ALL"$'\n'"$(jq -r ".tags[]?" "$RUNNER_TEMP/page.json")"
-              NEXT=$(grep -i "^link:" "$RUNNER_TEMP/headers.txt" | sed -n 's/.*<\([^>]*\)>.*/\1/p' | tr -d '\r')
+              NEXT=$( { grep -i "^link:" "$RUNNER_TEMP/headers.txt" || true; } | sed -n 's/.*<\([^>]*\)>.*/\1/p' | tr -d '\r')
               if [ -n "$NEXT" ]; then URL="https://ghcr.io${NEXT}"; else URL=""; fi
             done
             STABLE=$(echo "$ALL" \
               | grep -E '^[0-9]{4}\.[0-9]+\.[0-9]+(-[0-9]+)?$' \
               | sort -V)
             if [ -n "$MAX_VERSION" ]; then
-              STABLE=$(echo "$STABLE" | sed "/^${MAX_VERSION//./\\.}\$/q")
+              # Keep releases not newer than the ceiling, by version order, so a
+              # ceiling that is not itself a published tag still works.
+              CAPPED=""
+              for V in $STABLE; do
+                if [ "$(printf '%s\n%s\n' "$V" "$MAX_VERSION" | sort -V | tail -1)" = "$MAX_VERSION" ]; then
+                  CAPPED="$CAPPED$V"$'\n'
+                fi
+              done
+              STABLE="$CAPPED"
             fi
-            LATEST=$(echo "$STABLE" | tail -1)
+            LATEST=$(echo "$STABLE" | sed '/^$/d' | tail -1)
           fi
           if [ -z "$LATEST" ]; then
             echo "::error::Could not resolve a stable YYYY.M.D tag for ${BASE_REPO}"
@@ -97,23 +117,38 @@ jobs:
           # registry (not `docker inspect`, which only sees locally-pulled images
           # — a fresh runner has none, so it would always look empty and force a
           # rebuild). Empty on the first run after this migration -> one rebuild.
+          # A registry or network failure must fail the job (set -e): only a
+          # successful read with no label counts as "never built by this workflow".
           CURRENT=$(docker buildx imagetools inspect "${IMAGE_NAME}:latest" \
-            --format '{{ index .Image.Config.Labels "org.opencontainers.image.base.version" }}' 2>/dev/null || echo "")
+            --format '{{ index .Image.Config.Labels "org.opencontainers.image.base.version" }}')
+          if [ "$CURRENT" = "<no value>" ]; then CURRENT=""; fi
           echo "version=$CURRENT" >> "$GITHUB_OUTPUT"
           echo "Currently published base version: ${CURRENT:-<none>}"
 
       - name: Decide whether to rebuild
         id: decide
+        env:
+          LATEST: ${{ steps.latest.outputs.version }}
+          CURRENT: ${{ steps.current.outputs.version }}
+          EVENT: ${{ github.event_name }}
+          FORCE_VERSION: ${{ github.event.inputs.force_version }}
         run: |
-          if [ "${{ github.event_name }}" != "schedule" ]; then
+          newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]; }
+          if [ -n "$FORCE_VERSION" ]; then
             echo "build=true" >> "$GITHUB_OUTPUT"
-            echo "Non-scheduled trigger (${{ github.event_name }}) -> always rebuild"
-          elif [ "${{ steps.latest.outputs.version }}" != "${{ steps.current.outputs.version }}" ]; then
+            echo "Forced version $FORCE_VERSION -> rebuild (even if older than '$CURRENT')"
+          elif [ -z "$CURRENT" ]; then
             echo "build=true" >> "$GITHUB_OUTPUT"
-            echo "New stable release ${{ steps.latest.outputs.version }} (published image is on '${{ steps.current.outputs.version }}') -> rebuild"
+            echo "Published image has no version label -> rebuild on $LATEST"
+          elif newer "$LATEST" "$CURRENT"; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "New stable release $LATEST (published image is on $CURRENT) -> rebuild"
+          elif [ "$LATEST" = "$CURRENT" ] && [ "$EVENT" != "schedule" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "Same release $LATEST, triggered by $EVENT (image files changed or manual run) -> rebuild"
           else
             echo "build=false" >> "$GITHUB_OUTPUT"
-            echo "Already on ${{ steps.latest.outputs.version }} -> skip rebuild"
+            echo "Nothing to do: newest allowed release is $LATEST, published image is on $CURRENT"
           fi
 
       - name: Checkout

@@ -61,7 +61,8 @@ fi
 DOCTOR_MARKER="/home/node/.openclaw/.flux-doctor-${FLUX_IMAGE_OPENCLAW_VERSION:-unknown}"
 if [ -n "$FLUX_IMAGE_OPENCLAW_VERSION" ] && [ ! -f "$DOCTOR_MARKER" ]; then
     echo "Running openclaw doctor --fix for ${FLUX_IMAGE_OPENCLAW_VERSION} (first start of this version)..."
-    if openclaw doctor --fix --non-interactive; then
+    # Bounded so a stuck Doctor cannot keep the gateway from ever starting.
+    if timeout 900 openclaw doctor --fix --non-interactive; then
         touch "$DOCTOR_MARKER"
     else
         echo "WARNING: openclaw doctor exited non-zero; will retry on next start."
