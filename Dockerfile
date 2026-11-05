@@ -6,12 +6,12 @@
 # published image to the newest stable tag when upstream cuts a release, passing
 # it as --build-arg OPENCLAW_VERSION. This default is the fallback for local
 # builds; override with: --build-arg OPENCLAW_VERSION=YYYY.M.D
-ARG OPENCLAW_VERSION=2026.9.5
+ARG OPENCLAW_VERSION=2026.11.1
 FROM ghcr.io/openclaw/openclaw:${OPENCLAW_VERSION}
 
 # Re-declare after FROM so start.sh can see which release this image carries.
 ARG OPENCLAW_VERSION
-ENV OPENCLAW_VERSION=${OPENCLAW_VERSION}
+ENV FLUX_IMAGE_OPENCLAW_VERSION=${OPENCLAW_VERSION}
 
 USER root
 

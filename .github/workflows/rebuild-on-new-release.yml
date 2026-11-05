@@ -16,6 +16,12 @@ on:
   push:
     branches:
       - main
+    # Only changes that alter the image rebuild it. A README or workflow edit
+    # would otherwise publish an identical build under a new digest, and every
+    # deployed app would be soft-redeployed for nothing.
+    paths:
+      - 'Dockerfile'
+      - 'start.sh'
   workflow_dispatch:
     inputs:
       force_version:
@@ -26,10 +32,14 @@ on:
 env:
   IMAGE_NAME: runonflux/openclaw-tailscale
   BASE_REPO: openclaw/openclaw          # GHCR repository (ghcr.io/<BASE_REPO>)
-  # Highest upstream release the scheduled job may publish. Raised by hand once
-  # a release is safe to roll out fleet-wide (2026.9.5 is the migration bridge
-  # for installs older than July 2026; do not skip past it).
-  MAX_VERSION: '2026.9.5'
+  # Optional ceiling for the scheduled job, e.g. '2026.9.5'. Empty = follow the
+  # newest stable release. Use it to hold a release back when an upstream
+  # version needs a one-off migration step before the fleet may move on.
+  MAX_VERSION: ''
+
+permissions:
+  contents: read
+  actions: write   # keepalive step below
 
 jobs:
   check-and-rebuild:
@@ -38,8 +48,10 @@ jobs:
     steps:
       - name: Resolve newest stable upstream version
         id: latest
+        env:
+          FORCE_VERSION: ${{ github.event.inputs.force_version }}
         run: |
-          OVERRIDE="${{ github.event.inputs.force_version }}"
+          OVERRIDE="$FORCE_VERSION"
           if [ -n "$OVERRIDE" ]; then
             LATEST="$OVERRIDE"
             echo "Using forced version: $LATEST"
@@ -63,9 +75,13 @@ jobs:
               NEXT=$(grep -i "^link:" "$RUNNER_TEMP/headers.txt" | sed -n 's/.*<\([^>]*\)>.*/\1/p' | tr -d '\r')
               if [ -n "$NEXT" ]; then URL="https://ghcr.io${NEXT}"; else URL=""; fi
             done
-            LATEST=$(echo "$ALL" \
+            STABLE=$(echo "$ALL" \
               | grep -E '^[0-9]{4}\.[0-9]+\.[0-9]+(-[0-9]+)?$' \
-              | sort -V | sed "/^${MAX_VERSION//./\\.}\$/q" | tail -1)
+              | sort -V)
+            if [ -n "$MAX_VERSION" ]; then
+              STABLE=$(echo "$STABLE" | sed "/^${MAX_VERSION//./\\.}\$/q")
+            fi
+            LATEST=$(echo "$STABLE" | tail -1)
           fi
           if [ -z "$LATEST" ]; then
             echo "::error::Could not resolve a stable YYYY.M.D tag for ${BASE_REPO}"
@@ -132,3 +148,14 @@ jobs:
             org.opencontainers.image.base.version=${{ steps.latest.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # GitHub disables scheduled workflows after 60 days without repository
+      # activity, and a successful build creates no commit. This call counts as
+      # activity, so the daily check keeps running between upstream releases.
+      - name: Keep the schedule alive
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X PUT "repos/${{ github.repository }}/actions/workflows/rebuild-on-new-release.yml/enable" \
+            || echo "::warning::could not refresh the workflow schedule"
