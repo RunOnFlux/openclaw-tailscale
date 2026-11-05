@@ -87,6 +87,17 @@ OpenClaw refuses to start on state written before its migrations have run, and t
 
 Installations older than July 2026 should go through `2026.9.5` first (upstream's documented bridge). The `:2026.9.5` image does that on its own at first start.
 
+### Behind Flux's FDM proxy (OpenClaw 2026.11 and later)
+
+OpenClaw 2026.11 answers `403 proxy_attribution_required` to any request that carries proxy headers (`X-Forwarded-For`, which FDM always adds) unless the connection comes from an address in `gateway.trustedProxies`. FDM's addresses are not fixed, so `start.sh` makes the setup address independent: when the command is `gateway` it moves the gateway to `127.0.0.1:<port+1>` (rewriting `--port` and `--bind`, which win over environment variables), starts a `socat` relay on the published port, and adds `127.0.0.1/32` and `::1/128` to `gateway.trustedProxies` (existing entries are kept). The relay forwards bytes untouched, so the gateway sees the client address FDM appended to `X-Forwarded-For`. A supervisor loop restarts the relay if it dies.
+
+Things to know:
+
+- The relay needs a gateway password or token and is skipped without one (the gateway then refuses to bind publicly, as before).
+- The gateway cannot tell FDM from a client that connects to the published port directly, so such a client chooses its own address for per-IP limits (for example the failed-login limiter). Authentication is still required, so use a strong password or token.
+- `FLUX_PROXY_RELAY=0` disables all of this. `FLUX_GATEWAY_INTERNAL_PORT` changes the internal port (default: public port + 1).
+- The Control UI still has to be reached from an allowed origin (`gateway.controlUi.allowedOrigins` or `gateway.publicOrigin`).
+
 ### Required GitHub secrets
 
 | Secret | Description |

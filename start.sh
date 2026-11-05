@@ -69,5 +69,103 @@ if [ -n "$FLUX_IMAGE_OPENCLAW_VERSION" ] && [ ! -f "$DOCTOR_MARKER" ]; then
     fi
 fi
 
+# OpenClaw 2026.11 refuses requests that carry proxy headers (X-Forwarded-For,
+# which Flux's FDM always adds) unless the connection comes from an address in
+# gateway.trustedProxies, and FDM's addresses are not fixed. So the gateway
+# listens on loopback only, a plain TCP relay owns the published port, and
+# loopback is the one trusted proxy: the gateway then reads the real client
+# address from the X-Forwarded-For that FDM appended. The relay forwards bytes
+# untouched, so headers and WebSockets pass through as they are.
+#
+# Trade-off, by design: the gateway can no longer tell FDM from a client that
+# connects to the published port directly, so a direct client chooses its own
+# address for per-IP limits. Authentication is still required, and the relay is
+# skipped when no gateway password or token is configured. Disable with
+# FLUX_PROXY_RELAY=0.
+gateway_has_auth() {
+    [ -n "${OPENCLAW_GATEWAY_PASSWORD:-}" ] && return 0
+    [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ] && return 0
+    MODE=$(timeout 30 openclaw config get gateway.auth.mode 2>/dev/null | tr -d '"[:space:]')
+    [ "$MODE" = "token" ] || [ "$MODE" = "password" ]
+}
+
+# Keep whatever the owner already trusts and add loopback; skip the write (and
+# the config backup rotation it causes) when loopback is already there.
+ensure_loopback_trusted_proxy() {
+    CURRENT=$(timeout 30 openclaw config get gateway.trustedProxies --json 2>/dev/null || echo '[]')
+    MERGED=$(CURRENT="$CURRENT" node -e '
+        let cur = [];
+        try { const v = JSON.parse(process.env.CURRENT); if (Array.isArray(v)) cur = v.filter((x) => typeof x === "string"); } catch (e) {}
+        const want = ["127.0.0.1/32", "::1/128"];
+        if (want.every((w) => cur.includes(w))) process.exit(3);
+        console.log(JSON.stringify([...cur, ...want.filter((w) => !cur.includes(w))]));
+    ') && RC=0 || RC=$?
+    if [ "$RC" = "3" ]; then return 0; fi
+    [ "$RC" = "0" ] && [ -n "$MERGED" ] && timeout 60 openclaw config set gateway.trustedProxies "$MERGED" >/dev/null 2>&1
+}
+
+if [ "${FLUX_PROXY_RELAY:-1}" = "1" ] && [ "${1:-}" = "gateway" ] && command -v socat >/dev/null 2>&1; then
+    PUBLIC_PORT="${OPENCLAW_GATEWAY_PORT:-18789}"
+    PREV=""
+    for ARG in "$@"; do
+        [ "$ARG" = "--" ] && break
+        case "$ARG" in
+            --port=*) PUBLIC_PORT="${ARG#--port=}" ;;
+        esac
+        if [ "$PREV" = "--port" ]; then PUBLIC_PORT="$ARG"; fi
+        PREV="$ARG"
+    done
+
+    if ! [[ "$PUBLIC_PORT" =~ ^[0-9]+$ ]] || [ "$PUBLIC_PORT" -lt 1 ] || [ "$PUBLIC_PORT" -gt 65534 ]; then
+        echo "WARNING: unusable gateway port '${PUBLIC_PORT}'; starting without the proxy relay."
+    elif ! gateway_has_auth; then
+        echo "WARNING: no gateway password or token configured; starting without the proxy relay."
+    else
+        INTERNAL_PORT="${FLUX_GATEWAY_INTERNAL_PORT:-$((PUBLIC_PORT + 1))}"
+        if ensure_loopback_trusted_proxy; then
+            # Rewrite --port / --bind wherever the caller put them (the Flux
+            # spec passes both, and flags win over environment variables).
+            NEW_ARGS=()
+            PREV=""
+            REST=0
+            for ARG in "$@"; do
+                if [ "$REST" = "1" ]; then
+                    NEW_ARGS+=("$ARG")
+                elif [ "$ARG" = "--" ]; then
+                    REST=1
+                    NEW_ARGS+=("$ARG")
+                elif [ "$PREV" = "--port" ]; then
+                    NEW_ARGS+=("$INTERNAL_PORT")
+                elif [ "$PREV" = "--bind" ]; then
+                    NEW_ARGS+=("loopback")
+                else
+                    case "$ARG" in
+                        --port=*) NEW_ARGS+=("--port=$INTERNAL_PORT") ;;
+                        --bind=*) NEW_ARGS+=("--bind=loopback") ;;
+                        *) NEW_ARGS+=("$ARG") ;;
+                    esac
+                fi
+                PREV="$ARG"
+            done
+            set -- "${NEW_ARGS[@]}"
+            export OPENCLAW_GATEWAY_PORT="$INTERNAL_PORT"
+            export OPENCLAW_GATEWAY_BIND="loopback"
+            echo "Proxy relay: 0.0.0.0:${PUBLIC_PORT} -> 127.0.0.1:${INTERNAL_PORT}"
+            (
+                # set -e would end this loop the first time socat dies, which is
+                # exactly when it has to come back.
+                set +e
+                while true; do
+                    socat "TCP-LISTEN:${PUBLIC_PORT},fork,reuseaddr" "TCP:127.0.0.1:${INTERNAL_PORT}"
+                    echo "WARNING: proxy relay exited, restarting in 1s"
+                    sleep 1
+                done
+            ) &
+        else
+            echo "WARNING: could not set gateway.trustedProxies; starting without the proxy relay."
+        fi
+    fi
+fi
+
 echo "Starting OpenClaw..."
 exec openclaw "$@"
