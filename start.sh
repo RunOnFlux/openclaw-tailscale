@@ -69,6 +69,50 @@ if [ -n "$FLUX_IMAGE_OPENCLAW_VERSION" ] && [ ! -f "$DOCTOR_MARKER" ]; then
     fi
 fi
 
+# The once-per-version Doctor run above is not enough on its own: the config
+# can become invalid AFTER it ran (the Flux spec seeds openclaw.json with a
+# key newer releases reject, a restored backup or a synced volume can bring
+# one back). OpenClaw then exits with code 78 on every start, the container
+# stays down, and a restart or failover hits the same file. So validate on
+# every start and repair what is wrong. Nothing here is fatal: if the config
+# is still invalid afterwards, OpenClaw prints its own error.
+#
+# Step 1 is surgical: drop the one key the Flux spec seeds and 2026.11 removed
+# (gateway.controlUi.allowInsecureAuth), touching nothing else. Doctor is the
+# fallback for anything else, but it also resets settings the owner chose in
+# the UI (it switched an enabled skill back off in testing), so it goes second.
+strip_removed_seed_key() {
+    CFG="${OPENCLAW_CONFIG_DIR:-/home/node/.openclaw}/openclaw.json" node -e '
+        const fs = require("fs");
+        const f = process.env.CFG;
+        let d;
+        try { d = JSON.parse(fs.readFileSync(f, "utf8")); } catch (e) { process.exit(3); }
+        const ui = d && d.gateway && d.gateway.controlUi;
+        if (!ui || typeof ui !== "object" || !("allowInsecureAuth" in ui)) process.exit(3);
+        delete ui.allowInsecureAuth;
+        const mode = fs.statSync(f).mode & 0o777;
+        const tmp = f + ".flux-tmp";
+        fs.writeFileSync(tmp, JSON.stringify(d, null, 2) + "\n", { mode });
+        fs.renameSync(tmp, f);
+    '
+}
+
+if ! timeout 120 openclaw config validate >/dev/null 2>&1; then
+    echo "OpenClaw config is invalid; trying to repair it..."
+    if strip_removed_seed_key; then
+        echo "Removed gateway.controlUi.allowInsecureAuth, which this OpenClaw release no longer accepts."
+    fi
+    if ! timeout 120 openclaw config validate >/dev/null 2>&1; then
+        echo "Running openclaw doctor --fix..."
+        timeout 300 openclaw doctor --fix --non-interactive || echo "WARNING: openclaw doctor exited non-zero."
+    fi
+    if timeout 120 openclaw config validate >/dev/null 2>&1; then
+        echo "OpenClaw config repaired."
+    else
+        echo "WARNING: OpenClaw config is still invalid after repair."
+    fi
+fi
+
 # OpenClaw 2026.11 refuses requests that carry proxy headers (X-Forwarded-For,
 # which Flux's FDM always adds) unless the connection comes from an address in
 # gateway.trustedProxies, and FDM's addresses are not fixed. So the gateway
